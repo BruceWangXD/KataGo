@@ -1,5 +1,8 @@
 import unittest
-from app import Game
+import errno
+import socket
+from unittest.mock import patch
+from app import Game, create_server
 class Engine:
     def __init__(self,size): self.commands=[]
     def command(self,text):
@@ -26,4 +29,32 @@ class GameTests(unittest.TestCase):
         g.engine.command=reject
         with self.assertRaises(ValueError):g.play('A1')
         self.assertEqual(g.moves,[]);self.assertEqual(g.snapshots,[])
+class StartupTests(unittest.TestCase):
+    def test_occupied_port_falls_back(self):
+        # Exercise a real occupied socket and a real HTTP server bind.
+        with socket.socket() as occupied:
+            occupied.bind(('127.0.0.1', 0))
+            occupied.listen()
+            port = occupied.getsockname()[1]
+            if port == 65535: self.skipTest('No higher port available')
+            with create_server(port) as server:
+                self.assertGreater(server.server_address[1], port)
+
+    def test_explicit_port_does_not_fall_back(self):
+        with socket.socket() as occupied:
+            occupied.bind(('127.0.0.1', 0))
+            occupied.listen()
+            with self.assertRaises(OSError) as caught:
+                create_server(occupied.getsockname()[1], fallback=False)
+            self.assertEqual(caught.exception.errno, errno.EADDRINUSE)
+
+    def test_other_bind_errors_are_not_retried(self):
+        with patch('app.ThreadingHTTPServer', side_effect=OSError(errno.EACCES, 'denied')) as constructor:
+            with self.assertRaises(OSError): create_server()
+            self.assertEqual(constructor.call_count, 1)
+
+    def test_invalid_port(self):
+        for port in (0, -1, 65536):
+            with self.assertRaises(ValueError): create_server(port)
+
 if __name__=='__main__':unittest.main()

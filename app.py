@@ -1,5 +1,5 @@
 """Local Go web app. Run: python app.py. Requires KataGo + a neural model."""
-import json, os, subprocess, threading, uuid
+import errno, json, os, subprocess, sys, threading, uuid
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -140,7 +140,36 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(200,dict(id=key,**game.state()))
         except (ValueError, OSError, RuntimeError, KeyError, TypeError) as e: self.reply(400,{'error':str(e)})
 
+def create_server(port=8000, fallback=True):
+    if not 1 <= port <= 65535:
+        raise ValueError('PORT 必须是 1 到 65535 之间的整数。')
+    ports = range(port, min(port + 11, 65536)) if fallback else [port]
+    for candidate in ports:
+        try:
+            return ThreadingHTTPServer(('127.0.0.1', candidate), Handler)
+        except OSError as error:
+            if error.errno != errno.EADDRINUSE:
+                raise
+    raise OSError(errno.EADDRINUSE, '端口已被占用，请使用 PORT=8080 python3 app.py 指定其他空闲端口。')
+
+def main():
+    try:
+        configured_port = os.environ.get('PORT')
+        server = create_server(int(configured_port) if configured_port is not None else 8000,
+                               fallback=configured_port is None)
+    except (ValueError, OSError) as error:
+        print(f'启动失败：{error}', file=sys.stderr)
+        return 1
+    with server:
+        port = server.server_address[1]
+        if configured_port is None and port != 8000:
+            print(f'8000 端口已被占用，已自动选择 {port}。', flush=True)
+        print(f'围棋网页：http://127.0.0.1:{port}', flush=True)
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            pass
+    return 0
+
 if __name__=='__main__':
-    port = int(os.environ.get('PORT', 8000))
-    print(f'围棋网页：http://127.0.0.1:{port}', flush=True)
-    ThreadingHTTPServer(('127.0.0.1',port),Handler).serve_forever()
+    sys.exit(main())
