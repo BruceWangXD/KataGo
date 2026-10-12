@@ -1,5 +1,5 @@
 """Local Go web app. Run: python app.py. Requires KataGo + a neural model."""
-import errno, json, os, shutil, subprocess, sys, threading, uuid
+import base64, errno, hmac, json, os, shutil, signal, subprocess, sys, threading, time, uuid
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -77,6 +77,7 @@ class Game:
         self.engine = engine_factory(size)
         self.moves, self.snapshots, self.board = [], [], [[0]*size for _ in range(size)]
         self.lock = threading.Lock()
+        self.last_used = time.monotonic()
     def state(self):
         over = bool(self.moves and (self.moves[-1]['vertex']=='resign' or (len(self.moves)>1 and self.moves[-1]['vertex']==self.moves[-2]['vertex']=='pass')))
         return dict(board=self.board, size=self.size, human=self.human, turn='B' if len(self.moves)%2==0 else 'W', moves=self.moves, over=over)
@@ -121,29 +122,63 @@ class Game:
         self.moves.pop(); self.board=self.snapshots.pop()
 
 GAMES={}
+GAMES_LOCK = threading.RLock()
+
+def cleanup_games(now=None):
+    now = time.monotonic() if now is None else now
+    with GAMES_LOCK:
+        for key, game in list(GAMES.items()):
+            if now - game.last_used >= 900:
+                game.engine.close()
+                del GAMES[key]
+
+def idle_cleanup(stop):
+    while not stop.wait(30):
+        cleanup_games()
+
 class Handler(BaseHTTPRequestHandler):
+    def authorized(self):
+        password = os.environ.get('GO_PASSWORD')
+        if not password:
+            return True
+        expected = 'Basic ' + base64.b64encode(('go:' + password).encode()).decode()
+        if hmac.compare_digest(self.headers.get('Authorization', '').encode(), expected.encode()):
+            return True
+        self.send_response(401)
+        self.send_header('WWW-Authenticate', 'Basic realm="Go trial", charset="UTF-8"')
+        self.send_header('Content-Length', '0')
+        self.end_headers()
+        return False
     def reply(self, status, obj):
         data=json.dumps(obj,ensure_ascii=False).encode(); self.send_response(status); self.send_header('Content-Type','application/json; charset=utf-8'); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data)
     def do_GET(self):
+        if not self.authorized(): return
         files={'/':('index.html','text/html; charset=utf-8'),'/app.js':('app.js','text/javascript; charset=utf-8'),'/style.css':('style.css','text/css; charset=utf-8')}
         if self.path not in files: return self.reply(404,{'error':'Not found'})
         name,mime=files[self.path]; data=(ROOT/'static'/name).read_bytes(); self.send_response(200); self.send_header('Content-Type',mime); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data)
     def do_POST(self):
+        if not self.authorized(): return
+        with GAMES_LOCK:
+            self.handle_post()
+    def handle_post(self):
         try:
+            cleanup_games()
             length=int(self.headers.get('Content-Length',0))
-            if length>4096: raise ValueError('请求过大')
+            if not 0 < length <= 4096: raise ValueError('请求大小无效')
             body=json.loads(self.rfile.read(length))
+            if not isinstance(body, dict): raise ValueError('请求格式无效')
             if self.path=='/api/new':
                 size=body.get('size',19); human=body.get('human','B')
                 if size not in (9,13,19) or human not in ('B','W'): raise ValueError('无效的棋盘或颜色')
                 old=GAMES.pop(body.get('id',''),None)
                 if old:
                     with old.lock: old.engine.close()
-                if len(GAMES)>=8: raise ValueError('对局数量已达上限，请重启服务清理。')
+                if len(GAMES)>=1: raise ValueError('试用版同时只支持一局，请等待当前对局结束或闲置 15 分钟后重试。')
                 game=Game(size,human); key=uuid.uuid4().hex; GAMES[key]=game
             else:
                 key=body.get('id'); game=GAMES.get(key)
                 if not game: raise ValueError('请先开始新对局。')
+                game.last_used = time.monotonic()
                 with game.lock:
                     if self.path=='/api/play':
                         x,y=body.get('x'),body.get('y')
@@ -169,6 +204,9 @@ def create_server(port=8000, fallback=True):
     raise OSError(errno.EADDRINUSE, '端口已被占用，请使用 PORT=8080 python3 app.py 指定其他空闲端口。')
 
 def main():
+    def stop_service(signum, frame):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, stop_service)
     try:
         configured_port = os.environ.get('PORT')
         server = create_server(int(configured_port) if configured_port is not None else 8000,
@@ -177,6 +215,9 @@ def main():
         print(f'启动失败：{error}', file=sys.stderr)
         return 1
     with server:
+        stop = threading.Event()
+        cleaner = threading.Thread(target=idle_cleanup, args=(stop,), daemon=True)
+        cleaner.start()
         port = server.server_address[1]
         if configured_port is None and port != 8000:
             print(f'8000 端口已被占用，已自动选择 {port}。', flush=True)
@@ -185,6 +226,11 @@ def main():
             server.serve_forever()
         except KeyboardInterrupt:
             pass
+        finally:
+            stop.set()
+            with GAMES_LOCK:
+                for game in GAMES.values(): game.engine.close()
+                GAMES.clear()
     return 0
 
 if __name__=='__main__':
