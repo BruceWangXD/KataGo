@@ -5,6 +5,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = Path(__file__).resolve().parent
 COLS = 'ABCDEFGHJKLMNOPQRST'
+from scoring import score_board
 
 def find_katago():
     configured = os.environ.get('KATAGO_BIN')
@@ -78,10 +79,14 @@ class Game:
         self.moves, self.snapshots, self.board = [], [], [[0]*size for _ in range(size)]
         self.lock = threading.Lock()
         self.last_used = time.monotonic()
+        self.scoring = False
+        self.score_overrides = {}
     def state(self):
         over = bool(self.moves and (self.moves[-1]['vertex']=='resign' or (len(self.moves)>1 and self.moves[-1]['vertex']==self.moves[-2]['vertex']=='pass')))
-        return dict(board=self.board, size=self.size, human=self.human, turn='B' if len(self.moves)%2==0 else 'W', moves=self.moves, over=over)
+        return dict(board=self.board, size=self.size, human=self.human, turn='B' if len(self.moves)%2==0 else 'W', moves=self.moves, over=over, scoring=score_board(self.board, self.score_overrides) if self.scoring else None)
     def apply(self, color, vertex):
+        self.scoring = False
+        self.score_overrides.clear()
         self.snapshots.append([row[:] for row in self.board])
         if vertex not in ('pass','resign'):
             x,y=COLS.index(vertex[0]), self.size-int(vertex[1:]); value=1 if color=='B' else 2
@@ -108,11 +113,13 @@ class Game:
         self.moves.append(dict(color=color,vertex=vertex))
     def play(self, vertex):
         s=self.state()
+        if self.scoring: raise ValueError('请先点击继续对弈，退出点目模式。')
         if s['over'] or s['turn']!=self.human: raise ValueError('当前不能落子，请让 AI 落子或悔棋。')
         self.engine.command(f'play {self.human} {vertex}')
         self.apply(self.human,vertex)
     def ai(self):
         s=self.state()
+        if self.scoring: raise ValueError('请先点击继续对弈，退出点目模式。')
         if s['over'] or s['turn']==self.human: raise ValueError('当前不是 AI 回合。')
         vertex=self.engine.command(f"genmove {s['turn']}").strip()
         self.apply(s['turn'],vertex.lower() if vertex.lower() in ('pass','resign') else vertex.upper())
@@ -120,6 +127,8 @@ class Game:
         if not self.moves: raise ValueError('还没有可撤回的棋步。')
         if self.moves[-1]['vertex'] != 'resign': self.engine.command('undo')
         self.moves.pop(); self.board=self.snapshots.pop()
+        self.scoring = False
+        self.score_overrides.clear()
 
 GAMES={}
 GAMES_LOCK = threading.RLock()
@@ -191,6 +200,19 @@ class Handler(BaseHTTPRequestHandler):
                     elif self.path=='/api/pass': game.play('pass')
                     elif self.path=='/api/ai': game.ai()
                     elif self.path=='/api/undo': game.undo()
+                    elif self.path=='/api/score':
+                        game.scoring = True
+                        game.score_overrides.clear()
+                    elif self.path=='/api/score-adjust':
+                        if not game.scoring: raise ValueError('请先进行点目结算。')
+                        region_id, owner = body.get('region'), body.get('owner')
+                        regions = score_board(game.board)['regions']
+                        if owner not in ('B', 'W', 'N') or region_id not in {r['id'] for r in regions}:
+                            raise ValueError('无效的空地归属或区域。')
+                        game.score_overrides[region_id] = owner
+                    elif self.path=='/api/resume':
+                        game.scoring = False
+                        game.score_overrides.clear()
                     else: return self.reply(404,{'error':'Not found'})
             self.reply(200,dict(id=key,**game.state()))
         except (ValueError, OSError, RuntimeError, KeyError, TypeError) as e: self.reply(400,{'error':str(e)})
