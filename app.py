@@ -5,7 +5,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = Path(__file__).resolve().parent
 COLS = 'ABCDEFGHJKLMNOPQRST'
-from scoring import score_board
+from scoring import score_board, stone_groups, settle_board
 
 def find_katago():
     configured = os.environ.get('KATAGO_BIN')
@@ -81,12 +81,14 @@ class Game:
         self.last_used = time.monotonic()
         self.scoring = False
         self.score_overrides = {}
+        self.group_owners = {}
     def state(self):
         over = bool(self.moves and (self.moves[-1]['vertex']=='resign' or (len(self.moves)>1 and self.moves[-1]['vertex']==self.moves[-2]['vertex']=='pass')))
-        return dict(board=self.board, size=self.size, human=self.human, turn='B' if len(self.moves)%2==0 else 'W', moves=self.moves, over=over, scoring=score_board(self.board, self.score_overrides) if self.scoring else None)
+        return dict(board=self.board, size=self.size, human=self.human, turn='B' if len(self.moves)%2==0 else 'W', moves=self.moves, over=over, scoring=settle_board(self.board, self.group_owners, self.score_overrides) if self.scoring else None)
     def apply(self, color, vertex):
         self.scoring = False
         self.score_overrides.clear()
+        self.group_owners.clear()
         self.snapshots.append([row[:] for row in self.board])
         if vertex not in ('pass','resign'):
             x,y=COLS.index(vertex[0]), self.size-int(vertex[1:]); value=1 if color=='B' else 2
@@ -129,6 +131,7 @@ class Game:
         self.moves.pop(); self.board=self.snapshots.pop()
         self.scoring = False
         self.score_overrides.clear()
+        self.group_owners.clear()
 
 GAMES={}
 GAMES_LOCK = threading.RLock()
@@ -201,15 +204,28 @@ class Handler(BaseHTTPRequestHandler):
                     elif self.path=='/api/ai': game.ai()
                     elif self.path=='/api/undo': game.undo()
                     elif self.path=='/api/score':
+                        dead_vertices = set(game.engine.command('final_status_list dead').upper().split())
+                        owners = {}
+                        for group in stone_groups(game.board):
+                            is_dead = any(COLS[x] + str(game.size-y) in dead_vertices for x,y in group['points'])
+                            owners[group['id']] = ('W' if group['color']=='B' else 'B') if is_dead else group['color']
+                        game.group_owners = owners
                         game.scoring = True
                         game.score_overrides.clear()
                     elif self.path=='/api/score-adjust':
                         if not game.scoring: raise ValueError('请先进行点目结算。')
                         region_id, owner = body.get('region'), body.get('owner')
-                        regions = score_board(game.board)['regions']
+                        regions = settle_board(game.board, game.group_owners)['regions']
                         if owner not in ('B', 'W', 'N') or region_id not in {r['id'] for r in regions}:
                             raise ValueError('无效的空地归属或区域。')
                         game.score_overrides[region_id] = owner
+                    elif self.path=='/api/stone-adjust':
+                        if not game.scoring: raise ValueError('请先进行点目结算。')
+                        group_id, owner = body.get('group'), body.get('owner')
+                        if owner not in ('B','W') or group_id not in {g['id'] for g in stone_groups(game.board)}:
+                            raise ValueError('无效的棋块或归属。')
+                        game.group_owners[group_id] = owner
+                        game.score_overrides.clear()
                     elif self.path=='/api/resume':
                         game.scoring = False
                         game.score_overrides.clear()

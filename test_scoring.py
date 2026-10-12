@@ -41,4 +41,29 @@ class ScoringTests(unittest.TestCase):
     def test_invalid_owner(self):
         with self.assertRaises(ValueError):score_board([[0]],{'0,0':'invalid'})
 
+
+class LifeDeathTests(unittest.TestCase):
+    def test_dead_group_removed_and_surrounding_territory_recomputed(self):
+        from scoring import settle_board, stone_groups
+        board=[[1,1,1],[1,2,1],[1,1,1]]
+        group=next(g for g in stone_groups(board) if g['color']=='W')
+        dead=settle_board(board,{group['id']:'B'})
+        self.assertEqual(dead['dead'],{'B':0,'W':1})
+        self.assertEqual(dead['stones'],{'B':8,'W':0})
+        self.assertEqual(dead['territory']['B'],1)
+        self.assertEqual(dead['black'],9)
+        alive=settle_board(board,{group['id']:'W'})
+        self.assertEqual(alive['stones']['W'],1)
+        self.assertEqual(alive['territory']['B'],0)
+        self.assertEqual(board[1][1],2)
+    def test_connected_group_switches_as_one(self):
+        from scoring import settle_board, stone_groups
+        board=[[1,1,2],[0,0,2],[1,0,0]]
+        groups=stone_groups(board)
+        black=next(g for g in groups if g['id']=='stone-0,0')
+        self.assertEqual(len(black['points']),2)
+        s=settle_board(board,{black['id']:'W'})
+        self.assertEqual(s['dead']['B'],2)
+        self.assertEqual(s['stones']['B'],1)
+
 if __name__=='__main__':unittest.main()
