@@ -2,7 +2,7 @@ import unittest
 import errno
 import socket
 from unittest.mock import patch
-from app import Game, create_server
+from app import Game, create_server, find_katago
 class Engine:
     def __init__(self,size): self.commands=[]
     def command(self,text):
@@ -29,6 +29,23 @@ class GameTests(unittest.TestCase):
         g.engine.command=reject
         with self.assertRaises(ValueError):g.play('A1')
         self.assertEqual(g.moves,[]);self.assertEqual(g.snapshots,[])
+class EngineDiscoveryTests(unittest.TestCase):
+    def test_homebrew_path_without_shell_path(self):
+        for binary in ('/opt/homebrew/bin/katago', '/usr/local/bin/katago'):
+            with patch.dict('os.environ', {}, clear=True), patch('app.sys.platform', 'darwin'), patch('app.shutil.which', side_effect=lambda candidate: binary if candidate == binary else None):
+                self.assertEqual(find_katago(), binary)
+
+    def test_missing_mac_engine_has_install_instructions(self):
+        with patch.dict('os.environ', {}, clear=True), patch('app.sys.platform', 'darwin'), patch('app.shutil.which', return_value=None):
+            with self.assertRaisesRegex(ValueError, 'bash setup_macos.sh'):
+                find_katago()
+
+    def test_invalid_override_is_not_silently_replaced(self):
+        with patch.dict('os.environ', {'KATAGO_BIN': '/missing/katago'}, clear=True), patch('app.shutil.which', return_value=None) as lookup:
+            with self.assertRaisesRegex(ValueError, 'KATAGO_BIN'):
+                find_katago()
+            lookup.assert_called_once_with('/missing/katago')
+
 class StartupTests(unittest.TestCase):
     def test_occupied_port_falls_back(self):
         # Exercise a real occupied socket and a real HTTP server bind.

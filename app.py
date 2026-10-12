@@ -1,17 +1,33 @@
 """Local Go web app. Run: python app.py. Requires KataGo + a neural model."""
-import errno, json, os, subprocess, sys, threading, uuid
+import errno, json, os, shutil, subprocess, sys, threading, uuid
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = Path(__file__).resolve().parent
 COLS = 'ABCDEFGHJKLMNOPQRST'
 
+def find_katago():
+    configured = os.environ.get('KATAGO_BIN')
+    candidates = [configured] if configured else [
+        str(ROOT / 'bin' / ('katago.exe' if os.name == 'nt' else 'katago')),
+        '/workspace/katago-build/katago',
+        'katago',
+    ]
+    if not configured and sys.platform == 'darwin':
+        candidates.extend(['/opt/homebrew/bin/katago', '/usr/local/bin/katago'])
+    for candidate in candidates:
+        executable = shutil.which(candidate)
+        if executable:
+            return executable
+    if configured:
+        raise ValueError('KATAGO_BIN 指向的引擎不存在或不可执行，请检查路径：' + configured)
+    if sys.platform == 'darwin':
+        raise ValueError('尚未安装 KataGo 引擎。请在项目目录运行 bash setup_macos.sh，安装后重启 python3 app.py。模型已附带，无需另行下载。')
+    raise ValueError('找不到 KataGo 引擎。请安装 KataGo 并加入 PATH，或设置 KATAGO_BIN 为可执行文件路径。')
+
 class GTP:
     def __init__(self, size):
-        local_binary = ROOT / 'bin' / ('katago.exe' if os.name == 'nt' else 'katago')
-        cloud_binary = Path('/workspace/katago-build/katago')
-        default_binary = str(local_binary) if local_binary.is_file() else str(cloud_binary) if cloud_binary.is_file() else 'katago'
-        binary = os.environ.get('KATAGO_BIN') or default_binary
+        binary = find_katago()
         model = os.environ.get('KATAGO_MODEL') or str(ROOT / 'models' / 'g170-b6c96-s175395328-d26788732.bin.gz')
         config = os.environ.get('KATAGO_CONFIG', str(ROOT / 'gtp.cfg'))
         if not model or not Path(model).is_file():
