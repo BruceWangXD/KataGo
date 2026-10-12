@@ -1,13 +1,10 @@
 """Start a password protected local app and a free Cloudflare Quick Tunnel."""
-import base64
 import getpass
 import os
-from pathlib import Path
 import shutil
 import subprocess
 import sys
-import time
-import urllib.request
+import threading
 
 def main():
     tunnel = shutil.which('cloudflared')
@@ -24,34 +21,35 @@ def main():
     password = getpass.getpass('设置访客密码（至少 8 个字符，输入不显示）：')
     if len(password) < 8:
         print('密码太短，请重新运行。'); return 1
-    env = os.environ.copy()
-    env.update(GO_PASSWORD=password, PORT='8765')
-    root = Path(__file__).resolve().parent
-    app = subprocess.Popen([sys.executable, '-u', str(root / 'app.py')], env=env, cwd=str(root))
+    from app import Handler, ThreadingHTTPServer, GAMES, GAMES_LOCK, idle_cleanup
+    # Bind once to a port chosen by the OS, then share exactly that server.
+    os.environ['GO_PASSWORD'] = password
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    url = 'http://127.0.0.1:' + str(server.server_address[1])
+    stop = threading.Event()
+    worker = threading.Thread(target=server.serve_forever, daemon=True)
+    cleaner = threading.Thread(target=idle_cleanup, args=(stop,), daemon=True)
+    worker.start()
+    cleaner.start()
     proxy = None
     try:
-        ready = False
-        for _ in range(50):
-            if app.poll() is not None: return 1
-            try:
-                request = urllib.request.Request('http://127.0.0.1:8765/', headers={'Authorization': 'Basic ' + base64.b64encode(('go:' + password).encode()).decode()})
-                with urllib.request.urlopen(request, timeout=1) as response:
-                    ready = response.status == 200
-                if ready: break
-            except OSError: time.sleep(0.1)
-        if not ready:
-            print('本地服务未就绪，未开启隧道。'); return 1
+        print('本地服务：' + url, flush=True)
         print('访客用户名：go；密码为你刚设置的密码。将下面日志中的 https://…trycloudflare.com 地址发给朋友。', flush=True)
         print('保持此终端和 Mac 运行；Control+C 停止分享。', flush=True)
-        proxy = subprocess.Popen([tunnel, 'tunnel', '--url', 'http://127.0.0.1:8765', '--protocol', 'http2'])
-        while proxy.poll() is None and app.poll() is None: time.sleep(0.5)
-        return 1
+        proxy = subprocess.Popen([tunnel, 'tunnel', '--url', url, '--protocol', 'http2'])
+        return proxy.wait()
     except KeyboardInterrupt: return 0
     finally:
-        for process in (proxy, app):
-            if process is not None and process.poll() is None:
-                process.terminate()
-                try: process.wait(timeout=5)
-                except subprocess.TimeoutExpired: process.kill(); process.wait()
+        if proxy is not None and proxy.poll() is None:
+            proxy.terminate()
+            try: proxy.wait(timeout=5)
+            except subprocess.TimeoutExpired: proxy.kill(); proxy.wait()
+        stop.set()
+        server.shutdown()
+        server.server_close()
+        worker.join()
+        with GAMES_LOCK:
+            for game in GAMES.values(): game.engine.close()
+            GAMES.clear()
 
 if __name__ == '__main__': sys.exit(main())

@@ -167,13 +167,17 @@ class Handler(BaseHTTPRequestHandler):
             if not 0 < length <= 4096: raise ValueError('请求大小无效')
             body=json.loads(self.rfile.read(length))
             if not isinstance(body, dict): raise ValueError('请求格式无效')
+            if self.path=='/api/end':
+                old = GAMES.pop(body.get('id', ''), None)
+                if old: old.engine.close()
+                return self.reply(200, {'ended': True})
             if self.path=='/api/new':
                 size=body.get('size',19); human=body.get('human','B')
                 if size not in (9,13,19) or human not in ('B','W'): raise ValueError('无效的棋盘或颜色')
                 old=GAMES.pop(body.get('id',''),None)
                 if old:
                     with old.lock: old.engine.close()
-                if len(GAMES)>=1: raise ValueError('试用版同时只支持一局，请等待当前对局结束或闲置 15 分钟后重试。')
+                if len(GAMES)>=1: raise ValueError('试用版同时只支持一局，请等待当前访客点击结束对局，或闲置 15 分钟后重试。')
                 game=Game(size,human); key=uuid.uuid4().hex; GAMES[key]=game
             else:
                 key=body.get('id'); game=GAMES.get(key)
