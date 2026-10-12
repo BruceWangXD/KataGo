@@ -3,13 +3,16 @@ import json, os, subprocess, threading, uuid
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-ROOT = Path(__file__).parent
+ROOT = Path(__file__).resolve().parent
 COLS = 'ABCDEFGHJKLMNOPQRST'
 
 class GTP:
     def __init__(self, size):
-        binary = os.environ.get('KATAGO_BIN', 'katago')
-        model = os.environ.get('KATAGO_MODEL', '')
+        local_binary = ROOT / 'bin' / ('katago.exe' if os.name == 'nt' else 'katago')
+        cloud_binary = Path('/workspace/katago-build/katago')
+        default_binary = str(local_binary) if local_binary.is_file() else str(cloud_binary) if cloud_binary.is_file() else 'katago'
+        binary = os.environ.get('KATAGO_BIN') or default_binary
+        model = os.environ.get('KATAGO_MODEL') or str(ROOT / 'models' / 'g170-b6c96-s175395328-d26788732.bin.gz')
         config = os.environ.get('KATAGO_CONFIG', str(ROOT / 'gtp.cfg'))
         if not model or not Path(model).is_file():
             raise ValueError('请设置 KATAGO_MODEL 为 KataGo 神经网络模型文件路径。')
@@ -138,5 +141,6 @@ class Handler(BaseHTTPRequestHandler):
         except (ValueError, OSError, RuntimeError, KeyError, TypeError) as e: self.reply(400,{'error':str(e)})
 
 if __name__=='__main__':
-    print('围棋网页：http://127.0.0.1:8000', flush=True)
-    ThreadingHTTPServer(('127.0.0.1',int(os.environ.get('PORT',8000))),Handler).serve_forever()
+    port = int(os.environ.get('PORT', 8000))
+    print(f'围棋网页：http://127.0.0.1:{port}', flush=True)
+    ThreadingHTTPServer(('127.0.0.1',port),Handler).serve_forever()
